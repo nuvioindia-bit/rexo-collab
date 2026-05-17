@@ -1,0 +1,121 @@
+name: Build & APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Web + Android APK
+    runs-on: ubuntu-latest
+
+    env:
+      # GitHub Actions ubuntu-latest has Android SDK pre-installed here
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Java 21 (Capacitor 6 requires Java 21) ─────────────
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # ── 3. Accept Android licenses & install build tools ─────────────
+      - name: Accept Android licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "build-tools;34.0.0" \
+            "platforms;android-34" \
+            "platform-tools" || true
+
+      # ── 4. Setup pnpm ────────────────────────────────────────────────
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      # ── 5. Setup Node.js 22 ──────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      # ── 6. Install JS dependencies ───────────────────────────────────
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # ── 7. Type check ────────────────────────────────────────────────
+      - name: Type check
+        run: pnpm exec tsc --noEmit -p tsconfig.check.json
+
+      # ── 8. Lint ──────────────────────────────────────────────────────
+      - name: Lint check
+        run: pnpm exec biome lint || true
+
+      # ── 9. Build web assets → dist/ ──────────────────────────────────
+      - name: Build web app
+        run: pnpm exec vite build
+
+      # ── 10. Add Capacitor Android platform ───────────────────────────
+      - name: Add Android platform
+        run: pnpm exec cap add android
+
+      # ── 11. Copy web assets into Android project ─────────────────────
+      - name: Sync Capacitor
+        run: pnpm exec cap sync android
+
+      # ── 12. Make Gradle wrapper executable ───────────────────────────
+      - name: Grant Gradle execute permission
+        run: chmod +x android/gradlew
+
+      # ── 13. Build APK (debug-signed, fully installable) ──────────────
+      # NOTE: Debug APK = signed with Android debug key, installs on any
+      # device with "Install unknown apps" enabled. No keystore needed.
+      - name: Build APK
+        working-directory: android
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --build-cache \
+            --parallel \
+            -Pandroid.enableJetifier=true \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=512m"
+
+      # ── 14. Collect & rename APK ─────────────────────────────────────
+      - name: Collect APK
+        run: |
+          mkdir -p artifacts
+          APK_FILE=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -1)
+          cp "$APK_FILE" "artifacts/rexo-collab-$(date +'%Y%m%d-%H%M')-debug.apk"
+          echo "APK_PATH=artifacts/rexo-collab-$(date +'%Y%m%d-%H%M')-debug.apk" >> $GITHUB_ENV
+          ls -lh artifacts/
+
+      # ── 15. Upload APK (download from Actions → Artifacts tab) ───────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rexo-collab-apk
+          path: artifacts/*.apk
+          retention-days: 30
+
+      # ── 16. Upload web build artifact ────────────────────────────────
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rexo-collab-web
+          path: dist/
+          retention-days: 7
